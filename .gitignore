@@ -1,0 +1,11 @@
+# Python
+backend/.venv/
+backend/**/__pycache__/
+**/*.py[cod]
+
+# Local application data
+backend/data/chroma/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
