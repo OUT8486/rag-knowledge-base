@@ -144,7 +144,6 @@ async function sendQuestion() {
   try {
     const payload = {
       question: text,
-      top_k: 5,
     }
 
     // 选择了文档时只搜索该文档，否则搜索整个知识库
