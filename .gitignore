@@ -2,6 +2,7 @@
 backend/.venv/
 backend/**/__pycache__/
 **/*.py[cod]
+start.bat
 
 # Local application data
 backend/data/chroma/
