@@ -14,13 +14,24 @@
 
 ## 快速开始
 
-### 1.模型服务
+### 1. 配置模型服务（可选本地，端口 8081）
 
-将云端模型的信息填写在backend目录下的.env文件中，先复制一份.env.example文件，然后按照里面的三个键填写模型信息，然后把文件名改为.env
+把 `backend/.env.example` 复制成 `backend/.env`，按下表填三个键：
+
+| 键 | 云端填什么 | 本地填什么 |
+|---|---|---|
+| LLM_BASE_URL | https://<厂商>/v1 | http://127.0.0.1:8081/v1 |
+| LLM_API_KEY | 你的真实 key | 任意值 |
+| LLM_MODEL | <厂商模型 id> | <llama-server 的模型标识> |
+
+本地方式需要自己先启动 llama-server（参数参考：`--host 127.0.0.1 --port 8081 -m <模型>.gguf`）；
+云端方式不需要启动任何本地服务。
+
+**成功标志**：完成第 2 步后，在页面上提一个问题，答案里出现 `[S1]` 这类引用。
 
 ### 2.后端（8000）
 
-后端技术栈使用FastAPI，在backend目录下执行命令 `python -m venv .venv` 创建虚拟环境并激活虚拟环境，再执行命令 `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` 安装依赖，最后在backend执行命令 `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app` 启动后端
+后端技术栈使用FastAPI，在backend目录下执行命令 `python -m venv .venv` 创建虚拟环境，再执行命令 `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` 安装依赖，最后在backend执行命令 `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app` 启动后端
 
 ### 3.前端（5173）
 
