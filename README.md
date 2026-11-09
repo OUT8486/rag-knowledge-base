@@ -1,8 +1,8 @@
 # KnowledgeFlow · 本地 RAG 文档知识库
 
-一个可以在本机完整运行的 PDF 知识库问答系统：上传 PDF 后自动解析、切分、向量化并写入 ChromaDB；提问时先做语义检索，再把检索结果交给本地 llama.cpp 大模型生成带来源引用的回答。
+一个可以在本机完整运行的 PDF 知识库问答系统：上传 PDF 后自动解析、切分、向量化并写入 ChromaDB；提问时先做语义检索，再把检索结果交给任意 OpenAI 兼容的云端服务的LLM生成带来源引用的回答。
 
-后端为 FastAPI，前端为 Vue 3 + Vite，模型服务通过 OpenAI 兼容接口接入；默认配置下，文档、向量和问答请求都在本机处理。
+后端为 FastAPI，前端为 Vue 3 + Vite，模型服务通过 OpenAI 兼容接口接入；默认配置下，文档、向量请求都在本机处理，问答在云端模型处理
 
 ## 环境要求
 
@@ -20,7 +20,7 @@
 
 ### 2.后端（8000）
 
-后端技术栈使用FastAPI，在backend目录下执行命令 `python -m venv .venv` 创建虚拟环境，执行`.venv\Scripts\Activate.ps1`激活虚拟环境，再执行命令 `pip install -r requirements.txt` 安装依赖，最后在backend执行命令 `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app` 启动后端
+后端技术栈使用FastAPI，在backend目录下执行命令 `python -m venv .venv` 创建虚拟环境并激活虚拟环境，再执行命令 `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` 安装依赖，最后在backend执行命令 `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app` 启动后端
 
 ### 3.前端（5173）
 
