@@ -36,6 +36,7 @@ async def add_request_id(request, call_next):
 
     try:
         response = await call_next(request)
+        error_category = getattr(request.state, "error_category", None)
     except Exception as exc:
         # TODO：计算失败时的耗时，构造并输出错误日志
         fail_time=(perf_counter()-start_time)*1000
@@ -65,7 +66,10 @@ async def add_request_id(request, call_next):
     
     # TODO：状态码为 400、413、422 时，
     # 给 record 添加 error_category，值为 "input_error"
-    if response.status_code in (400,413,422):
+    if error_category is not None:
+        # TODO：把路由给出的类别写入 record
+        record["error_category"] = request.state.error_category
+    elif response.status_code in (400,413,422):
         record["error_category"] = "input_error"
     elif response.status_code == 502:
         record["error_category"] = "upstream_error"
