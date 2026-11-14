@@ -91,6 +91,16 @@ async def upload_pdf(file: UploadFile = File(...)):
             detail=str(exc),
         ) from exc
 
+    pages_with_text = sum(
+        bool(page["text"].strip()) for page in pages
+    )
+
+    if pages_with_text == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="PDF 中没有可提取的文字，请上传包含文字的 PDF。"
+        )
+
     document_id = uuid4().hex
 
     chunks = chunk_pages(
@@ -109,10 +119,6 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     total_characters = sum(
         len(page["text"]) for page in pages
-    )
-
-    pages_with_text = sum(
-        bool(page["text"].strip()) for page in pages
     )
 
     return {
