@@ -121,6 +121,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         len(page["text"]) for page in pages
     )
 
+    blank_page_count = len(pages) - pages_with_text
+
     return {
         "document_id": document_id,
         "filename": Path(filename).name,
@@ -128,6 +130,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         "page_count": len(pages),
         "pages_with_text": pages_with_text,
         "total_characters": total_characters,
+        "blank_page_count": blank_page_count,
         "chunk_count": len(chunks),
         "indexed_count": indexed_count,
         "chunks_preview": chunks[:3],
