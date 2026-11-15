@@ -104,10 +104,38 @@ def test_upload_no_text():
         mock_chunk.assert_not_called()
         mock_index.assert_not_called()
         
+def test_upload_single_long_page():
+    pages = [
+        {"page": 1, "text": "RAG"*300},
+    ]
+    with (
+        patch("app.api.documents.extract_pdf_pages", return_value = pages) as mock_parse,
+        patch("app.api.documents.add_chunks", return_value = 2) as mock_index,
+        TestClient(app) as client,
+    ):
+        content = b"mock pdf"
+        pdf_name = "mixed.pdf"
+        response = client.post(
+            "/api/documents/upload",
+            files={"file": (pdf_name, content, "application/pdf")},
+        )
+        assert response.status_code == 200
+        body=response.json()
+        assert body["page_count"] == 1
+        assert body["pages_with_text"] == 1
+        assert body["blank_page_count"] == 0
+        assert body["chunk_count"] == 2
+        assert body["indexed_count"] == 2
+        assert body["total_characters"] == 900
+        assert body["chunks_preview"][0]["page"] == 1
+        assert body["chunks_preview"][1]["page"] == 1
+        mock_parse.assert_called_once_with(content)
+        mock_index.assert_called_once_with(body["chunks_preview"], pdf_name)
+
 def test_upload_with_blank_page():
     pages = [
-        {"page": 1, "text": "  \n"},
-        {"page": 2, "text": "RAG"},
+        {"page": 1, "text": "   \n"},
+        {"page": 2, "text": "RAG"}
     ]
     with (
         patch("app.api.documents.extract_pdf_pages", return_value = pages) as mock_parse,
@@ -124,13 +152,11 @@ def test_upload_with_blank_page():
         body=response.json()
         assert body["page_count"] == 2
         assert body["pages_with_text"] == 1
-        assert body["total_characters"] == 6
+        assert body["blank_page_count"] == 1
         assert body["chunk_count"] == 1
         assert body["indexed_count"] == 1
+        assert body["total_characters"] == 7
         assert body["chunks_preview"][0]["text"] == "RAG"
         assert body["chunks_preview"][0]["page"] == 2
         mock_parse.assert_called_once_with(content)
         mock_index.assert_called_once_with(body["chunks_preview"], pdf_name)
-        
-
-
