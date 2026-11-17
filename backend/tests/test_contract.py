@@ -170,27 +170,146 @@ def test_amount_rejects_non_numeric_values(valid_contract_data, amount):
 def test_date_fields_require_strings(valid_contract_data, field, value):
     valid_contract_data[field] = value
 
-    with pytest.raises(ExtractionError, match="字段校验失败"):
+    with pytest.raises(ExtractionError, match="字段校验失败") as exc_info:
         parse_contract(json.dumps(valid_contract_data))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert {error["loc"] for error in cause.errors()} == {(field,)}
 
 
 @pytest.mark.parametrize(
     ("start_date", "end_date"),
     [
-        ("not-a-date", "also-not-a-date"),
-        ("", ""),
-        ("2027-11-15", "2026-11-16"),
+        ("2024-02-29", "2024-03-01"),
+        ("2000-02-29", "2000-03-01"),
+        ("0001-01-01", "9999-12-31"),
     ],
 )
-def test_date_strings_are_not_validated(valid_contract_data, start_date, end_date):
-    # 当前模型只要求日期是字符串，没有日期格式或先后顺序约束。
+def test_valid_dates_remain_strings(valid_contract_data, start_date, end_date):
     valid_contract_data["start_date"] = start_date
     valid_contract_data["end_date"] = end_date
 
-    with pytest.raises(ExtractionError, match="字段校验失败|日期不存在|结束日期早于开始日期"):
-        contract = parse_contract(json.dumps(valid_contract_data))
-        assert contract.start_date == start_date
-        assert contract.end_date == end_date
+    contract = parse_contract(json.dumps(valid_contract_data))
+
+    assert isinstance(contract.start_date, str)
+    assert isinstance(contract.end_date, str)
+    assert contract.model_dump() == valid_contract_data
+
+
+@pytest.mark.parametrize("field", ["start_date", "end_date"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "not-a-date",
+        "20261116",
+        "2026-1-16",
+        "2026-11-6",
+        "26-11-16",
+        "02026-11-16",
+        "2026/11/16",
+        "16-11-2026",
+        "2026-W47-1",
+        "2026-11-16T00:00:00",
+        "2026-11-16 00:00:00",
+        "2026-11-16T00:00:00Z",
+        " 2026-11-16",
+        "2026-11-16 ",
+        "2026-11-16\n",
+        "２０２６-１１-１６",
+    ],
+)
+def test_date_fields_reject_invalid_format(valid_contract_data, field, value):
+    # 日期必须严格符合 YYYY-MM-DD，不接受时间、空白或其他 ISO 日期表示。
+    valid_contract_data[field] = value
+
+    with pytest.raises(ExtractionError, match="日期格式必须为 YYYY-MM-DD") as exc_info:
+        parse_contract(json.dumps(valid_contract_data))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert {error["loc"] for error in cause.errors()} == {(field,)}
+
+
+@pytest.mark.parametrize("field", ["start_date", "end_date"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-02-29",
+        "1900-02-29",
+        "2026-04-31",
+        "2026-00-16",
+        "2026-13-16",
+        "2026-11-00",
+        "2026-11-32",
+        "0000-01-01",
+    ],
+)
+def test_date_fields_reject_nonexistent_dates(valid_contract_data, field, value):
+    valid_contract_data[field] = value
+
+    with pytest.raises(ExtractionError, match="日期不存在") as exc_info:
+        parse_contract(json.dumps(valid_contract_data))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert {error["loc"] for error in cause.errors()} == {(field,)}
+
+
+@pytest.mark.parametrize(
+    ("start_date", "end_date"),
+    [
+        ("2027-11-15", "2026-11-16"),
+        ("2026-11-17", "2026-11-16"),
+        ("2024-03-01", "2024-02-29"),
+    ],
+)
+def test_end_date_cannot_precede_start_date(valid_contract_data, start_date, end_date):
+    valid_contract_data["start_date"] = start_date
+    valid_contract_data["end_date"] = end_date
+
+    with pytest.raises(ExtractionError, match="结束日期早于开始日期") as exc_info:
+        parse_contract(json.dumps(valid_contract_data))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert {error["loc"] for error in cause.errors()} == {()}
+
+
+@pytest.mark.parametrize("value", ["2026-11-16", "2024-02-29"])
+def test_same_day_contract_is_allowed(valid_contract_data, value):
+    valid_contract_data["start_date"] = value
+    valid_contract_data["end_date"] = value
+
+    contract = parse_contract(json.dumps(valid_contract_data))
+
+    assert contract.model_dump() == valid_contract_data
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("start_date", None),
+        ("end_date", None),
+        ("start_date", "not-a-date"),
+        ("end_date", "2026-02-30"),
+        ("amount", "12000"),
+        ("contract_type", "invalid"),
+    ],
+)
+def test_field_validation_precedes_date_order(valid_contract_data, field, value):
+    # 日期倒置且有字段错误时，必须先报告字段错误，不能执行模型的起止检查。
+    valid_contract_data["start_date"] = "2027-11-15"
+    valid_contract_data["end_date"] = "2026-11-16"
+    valid_contract_data[field] = value
+
+    with pytest.raises(ExtractionError, match="字段校验失败") as exc_info:
+        parse_contract(json.dumps(valid_contract_data))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert {error["loc"] for error in cause.errors()} == {(field,)}
 
 
 def test_extra_fields_are_ignored(valid_contract_data):
