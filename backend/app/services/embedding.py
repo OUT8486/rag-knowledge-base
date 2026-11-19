@@ -21,6 +21,7 @@ def get_embedding_model() -> SentenceTransformer:
     return SentenceTransformer(
         MODEL_NAME,
         device="cpu",
+        local_files_only=True,
     )
 
 
