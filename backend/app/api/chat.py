@@ -3,12 +3,15 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from openai import OpenAIError
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from app.services.errors import ExtractionError
 from app.services.llm import (
     LLMConfigurationError,
     generate_answer,
+    generate_search_intent,
 )
 from app.services.vector_store import search_chunks
 
@@ -56,11 +59,62 @@ async def chat(payload: ChatRequest,http_request: Request):
             detail="问题不能为空。",
         )
 
+    try:
+        intent = await run_in_threadpool(
+            generate_search_intent,
+            question,
+        )
+    except ExtractionError as exc:
+        # TODO：设置本次请求的错误类别
+        http_request.state.error_category = "upstream_error"
+        # TODO：输出带请求编号的异常详情日志
+        logger.exception(json.dumps({
+            "event":"intent_generation_failed",
+            "request_id":http_request.state.request_id,
+            "error_category":"upstream_error",
+            "error_type":type(exc).__name__
+        }))
+        # TODO：抛出 HTTPException，返回明确的错误说明
+        raise HTTPException(
+            status_code=502,
+            detail="模型调用失败，请稍后重试。"
+        ) from exc
+    except LLMConfigurationError as exc:
+        # TODO：设置本次请求的错误类别
+        http_request.state.error_category = "config_error"
+        # TODO：输出带请求编号的异常详情日志
+        logger.exception(json.dumps({
+            "event":"intent_generation_failed",
+            "request_id":http_request.state.request_id,
+            "error_category":"config_error",
+            "error_type":type(exc).__name__
+        }))
+        # TODO：抛出 HTTPException，返回明确的错误说明
+        raise HTTPException(
+            status_code=503,
+            detail="服务配置不完整，请联系管理员。"
+        ) from exc
+    except Exception as exc:
+        # TODO：设置本次请求的错误类别
+        http_request.state.error_category = "upstream_error"
+        # TODO：输出带请求编号的异常详情日志
+        logger.exception(json.dumps({
+            "event":"intent_generation_failed",
+            "request_id":http_request.state.request_id,
+            "error_category":"upstream_error",
+            "error_type":type(exc).__name__
+        }))
+        # TODO：抛出 HTTPException，返回明确的错误说明
+        raise HTTPException(
+            status_code=502,
+            detail="模型调用失败，请稍后重试。"
+        ) from exc 
+
     # 第一步：检索相关文本
     try:
         chunks = await run_in_threadpool(
             search_chunks,
-            question,
+            intent.query,
             payload.top_k,
             payload.document_id,
         )
