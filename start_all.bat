@@ -1,5 +1,10 @@
 @echo off
+setlocal
 set "ROOT=%~dp0"
+
+REM rem Load cached Hugging Face models without remote file checks
+REM set "HF_HUB_OFFLINE=1"
+REM set "TRANSFORMERS_OFFLINE=1"
 
 rem backend
 if not exist "%ROOT%backend\.venv\Scripts\python.exe" (
