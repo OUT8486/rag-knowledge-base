@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
+
+from app.services.llm_metrics import build_model_metrics
 
 # 固定从 backend/.env 读取配置
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -154,6 +157,8 @@ async def run_sync_request(
     或自行创建线程，否则实验观察不到同步调用对事件循环的阻塞。
     """
     print(f"[同步][{task.task_id}] 请求开始")
+    
+    started_time = time.perf_counter()
 
     # 直接在当前事件循环线程内执行阻塞调用，用于观察阻塞效果
     response = client.chat.completions.create(
@@ -162,6 +167,11 @@ async def run_sync_request(
         max_tokens=MAX_TOKENS,
         temperature=0,
     )
+
+    metrics = build_model_metrics(response, (time.perf_counter()-started_time)*1000)
+    metrics["task_id"] = task.task_id
+    metrics["client_type"] = "sync"
+    print(json.dumps(metrics))
 
     answer = (response.choices[0].message.content or "").strip()
     print(
@@ -180,6 +190,8 @@ async def run_async_request(
     """使用 AsyncOpenAI 处理一个请求，并返回 (task_id, answer)。"""
     print(f"[异步][{task.task_id}] 请求开始")
 
+    started_time = time.perf_counter()
+
     response = await client.chat.completions.create(
         model=config.model_name,
         messages=[{"role": "user", "content": task.question}],
@@ -187,6 +199,11 @@ async def run_async_request(
         temperature=0,
     )
 
+    metrics = build_model_metrics(response, (time.perf_counter()-started_time)*1000)
+    metrics["task_id"] = task.task_id
+    metrics["client_type"] = "async"
+    print(json.dumps(metrics))
+    
     answer = (response.choices[0].message.content or "").strip()
     print(
         f"[异步][{task.task_id}] 请求结束"
