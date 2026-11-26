@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from app.services.errors import ExtractionError
 from app.services.extract import SearchIntent, parse_intent
+from app.services.retry_executor import call_with_retry
 
 
 # 固定从 backend/.env 读取配置
@@ -49,6 +50,7 @@ def generate_answer(
         api_key=api_key or "local-no-key",
         base_url=base_url,
         timeout=90.0,
+        max_retries=0,
     )
 
     if sources:
@@ -90,21 +92,24 @@ def generate_answer(
 请根据参考资料回答，并在相关结论后标注来源。
 """.strip()
 
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-        temperature=0.2,
-        max_tokens=800,
-    )
+    def operation():
+        return client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                        "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            temperature=0.2,
+            max_tokens=800,
+        )
+    
+    response = call_with_retry(operation)
 
     answer = response.choices[0].message.content
 
@@ -148,6 +153,7 @@ def generate_search_intent(
         api_key=api_key or "local-no-key",
         base_url=base_url,
         timeout=90.0,
+        max_retries=0,
     )
     
     system_prompt = """
