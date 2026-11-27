@@ -1,142 +1,90 @@
+from typing import Annotated, Literal
 
-from pathlib import Path
-from uuid import uuid4
-
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from app.access import ReadScope, WriteScope
+from app.services.ingestion import Worker, runtime
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from app.services.chunker import chunk_pages
-from app.services.document_parser import extract_pdf_pages
-from app.services.vector_store import (
-    add_chunks,
-    delete_document as remove_document,
-    list_documents as get_documents,
-)
-
-
-router = APIRouter(
-    prefix="/api/documents",
-    tags=["文档管理"],
-)
-
+router = APIRouter(prefix="/api/kbs/{kb_id}", tags=["文档管理"])
+Runtime = Annotated[Worker, Depends(runtime)]
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
-@router.get("")
-async def list_all_documents():
-    """获取知识库文档列表。"""
 
-    documents = await run_in_threadpool(
-        get_documents
-    )
+class JobInfo(BaseModel):
+    job_id: str
+    document_id: str
+    filename: str
+    version: int
+    status: Literal["queued", "running", "ready", "failed"]
+    is_active: bool
+    indexed_count: int
+    page_count: int
+    error: str | None
 
-    return {
-        "document_count": len(documents),
-        "documents": documents,
-    }
+
+class DocumentInfo(BaseModel):
+    document_id: str
+    filename: str
+    version: int
+    chunk_count: int
 
 
-@router.delete("/{document_id}")
-async def delete_one_document(document_id: str):
-    """删除指定文档的所有向量片段。"""
+class DocumentList(BaseModel):
+    document_count: int
+    documents: list[DocumentInfo]
 
-    deleted_count = await run_in_threadpool(
-        remove_document,
-        document_id,
-    )
 
-    if deleted_count == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="文档不存在，或该文档没有已入库的文本块。",
-        )
+@router.get("/documents", response_model=DocumentList)
+def list_documents(
+    scope: ReadScope,
+    rt: Runtime,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    return rt.catalog.listing(scope.kb_id, limit, offset)
 
-    return {
-        "document_id": document_id,
-        "deleted_chunks": deleted_count,
-        "message": "文档及其向量片段已删除。",
-    }
 
-@router.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    """上传 PDF、提取文本、切分并写入向量数据库。"""
-
-    filename = file.filename or "unnamed.pdf"
-
-    if Path(filename).suffix.lower() != ".pdf":
-        raise HTTPException(
-            status_code=400,
-            detail="当前只支持 PDF 文件。",
-        )
-
-    content = await file.read(MAX_FILE_SIZE + 1)
-    await file.close()
-
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="上传的文件为空。",
-        )
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="文件大小不能超过 10 MB。",
-        )
-
+@router.post("/documents/upload", status_code=202, response_model=JobInfo)
+async def upload_pdf(scope: WriteScope, rt: Runtime, file: UploadFile = File(...)):
     try:
-        pages = extract_pdf_pages(content)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+        name = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+        if not name.lower().endswith(".pdf") or len(name) > 200 or any(ord(c) < 32 for c in name):
+            raise HTTPException(400, "请提供有效的 PDF 文件名。")
+        content = await file.read(MAX_FILE_SIZE + 1)
+    finally:
+        await file.close()
+    if not content:
+        raise HTTPException(400, "上传的文件为空。")
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(413, "文件大小不能超过 10 MB。")
+    if b"%PDF-" not in content[:1024]:
+        raise HTTPException(400, "文件没有有效的 PDF 标记。")
+    job = await run_in_threadpool(rt.catalog.enqueue, scope.kb_id, scope.subject, name, content)
+    rt.wake.set()
+    return job
 
-    pages_with_text = sum(
-        bool(page["text"].strip()) for page in pages
-    )
 
-    if pages_with_text == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="PDF 中没有可提取的文字，请上传包含文字的 PDF。"
-        )
+@router.get("/jobs/{job_id}", response_model=JobInfo)
+def job_status(job_id: str, scope: ReadScope, rt: Runtime):
+    job = rt.catalog.job(scope.kb_id, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在。")
+    return job
 
-    document_id = uuid4().hex
 
-    # 按 token 切分会加载本地模型并运行 tokenizer，和向量编码一样交给线程池。
-    chunks = await run_in_threadpool(
-        chunk_pages,
-        pages=pages,
-        document_id=document_id,
-    )
+@router.post("/jobs/{job_id}/retry", status_code=202, response_model=JobInfo)
+def retry_job(job_id: str, scope: WriteScope, rt: Runtime):
+    job = rt.catalog.job(scope.kb_id, job_id, retry=True)
+    if not job:
+        raise HTTPException(404, "任务不存在。")
+    rt.wake.set()
+    return job
 
-    # 将向量编码与数据库写入放在线程池中运行
-    indexed_count = await run_in_threadpool(
-        add_chunks,
-        chunks,
-        Path(filename).name,
-    )
 
-    total_characters = sum(
-        len(page["text"]) for page in pages
-    )
-
-    blank_page_count = len(pages) - pages_with_text
-
-    return {
-        "document_id": document_id,
-        "filename": Path(filename).name,
-        "file_size_bytes": len(content),
-        "page_count": len(pages),
-        "pages_with_text": pages_with_text,
-        "total_characters": total_characters,
-        "blank_page_count": blank_page_count,
-        "chunk_count": len(chunks),
-        "indexed_count": indexed_count,
-        "chunks_preview": chunks[:3],
-        "message": (
-            "文档解析、切分和向量入库成功"
-            if indexed_count == len(chunks) and chunks
-            else "文档没有生成可用的文本块"
-        ),
-    }
+@router.delete("/documents/{document_id}")
+def delete_document(document_id: str, scope: WriteScope, rt: Runtime):
+    if not rt.catalog.remove(scope.kb_id, document_id):
+        raise HTTPException(404, "文档不存在。")
+    rt.wake.set()
+    return {"document_id": document_id, "message": "文档已下线，后台将清理索引。"}

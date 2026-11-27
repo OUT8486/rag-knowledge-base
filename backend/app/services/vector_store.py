@@ -1,186 +1,87 @@
+"""One collection per authorized KB. Staged/retired versions are never retrieval candidates."""
+
 from pathlib import Path
+from threading import Lock
+
+from app.services import embedding
 
 
-# 数据库文件保存在 backend/data/chroma 中
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "chroma"
+class VectorStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self._client = None
+        self._collections = {}
+        self._lock = Lock()
 
-_client = None
-_collection = None
+    def client(self):
+        with self._lock:
+            if self._client is None:
+                import chromadb
+                from chromadb.config import Settings
 
+                self.path.mkdir(parents=True, exist_ok=True)
+                self._client = chromadb.PersistentClient(
+                    path=str(self.path), settings=Settings(anonymized_telemetry=False)
+                )
+            return self._client
 
-def _get_collection():
-    """首次使用时再初始化 ChromaDB，避免阻塞应用启动。"""
-    global _client, _collection
+    def close(self):
+        with self._lock:
+            self._collections.clear()
+            if self._client is not None:
+                self._client.close()
+                self._client = None
 
-    if _collection is None:
-        import chromadb
+    def collection(self, kb_id):
+        client = self.client()
+        with self._lock:
+            if kb_id not in self._collections:
+                self._collections[kb_id] = client.get_or_create_collection(
+                    name=f"kb_{kb_id}",
+                    configuration={"hnsw": {"space": "cosine"}},
+                    embedding_function=None,
+                )
+            return self._collections[kb_id]
 
-        DB_PATH.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(
-            path=str(DB_PATH)
+    def index(self, kb_id, version, doc, filename, chunks):
+        collection = self.collection(kb_id)
+        # Deterministic version-scoped IDs. A retry discards only its unpublished partial index.
+        collection.delete(where={"version_id": version})
+        for start in range(0, len(chunks), 64):
+            batch = chunks[start : start + 64]
+            texts = [c["text"] for c in batch]
+            collection.upsert(
+                ids=[c["chunk_id"] for c in batch],
+                documents=texts,
+                embeddings=embedding.embed_documents(texts),
+                metadatas=[
+                    {
+                        "document_id": doc,
+                        "version_id": version,
+                        "filename": filename,
+                        "page": c["page"],
+                        "chunk_index": c["chunk_index"],
+                    }
+                    for c in batch
+                ],
+            )
+
+    def discard(self, kb_id, version):
+        self.collection(kb_id).delete(where={"version_id": version})
+
+    def search(self, kb_id, versions, query, top_k):
+        if not versions:
+            return []  # No way to request an unfiltered search, including for an empty KB.
+        where = {"version_id": versions[0] if len(versions) == 1 else {"$in": versions}}
+        found = self.collection(kb_id).query(
+            query_embeddings=[embedding.embed_query(query)],
+            where=where,
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
         )
-        _collection = _client.get_or_create_collection(
-            name="knowledge_chunks",
-            metadata={"hnsw:space": "cosine"},
-            embedding_function=None,
-        )
-
-    return _collection
-
-
-def add_chunks(
-    chunks: list[dict],
-    filename: str,
-) -> int:
-    """将文本块向量化，并保存到 ChromaDB。"""
-
-    if not chunks:
-        return 0
-
-    from app.services.embedding import embed_documents
-
-    texts = [chunk["text"] for chunk in chunks]
-
-    # 1. 将文本块转换为向量
-    embeddings = embed_documents(texts)
-
-    # 2. 准备来源元数据
-    metadatas = [
-        {
-            "document_id": chunk["document_id"],
-            "filename": filename,
-            "page": chunk["page"],
-            "chunk_index": chunk["chunk_index"],
-        }
-        for chunk in chunks
-    ]
-
-    # 3. 保存向量、正文、ID 和元数据
-    _get_collection().upsert(
-        ids=[chunk["chunk_id"] for chunk in chunks],
-        embeddings=embeddings,
-        documents=texts,
-        metadatas=metadatas,
-    )
-
-    return len(chunks)
-
-
-def search_chunks(
-    query: str,
-    top_k: int = 5,
-    document_id: str | None = None,
-) -> list[dict]:
-    """根据问题检索最相关的文本块。"""
-
-    from app.services.embedding import embed_query
-
-    collection = _get_collection()
-    total_count = collection.count()
-
-    if total_count == 0:
-        return []
-
-    # 1. 将用户的问题转换为向量
-    query_embedding = embed_query(query)
-
-    # 2. 设置检索参数
-    query_params = {
-        "query_embeddings": [query_embedding],
-        "n_results": min(top_k, total_count),
-        "include": [
-            "documents",
-            "metadatas",
-            "distances",
-        ],
-    }
-
-    # 可选：只搜索指定文档
-    if document_id:
-        query_params["where"] = {
-            "document_id": document_id
-        }
-
-    # 3. 执行语义检索
-    results = collection.query(**query_params)
-
-    ids = results["ids"][0]
-    documents = results["documents"][0]
-    metadatas = results["metadatas"][0]
-    distances = results["distances"][0]
-
-    # 4. 整理为前端更容易使用的结构
-    formatted_results = []
-
-    for chunk_id, text, metadata, distance in zip(
-        ids,
-        documents,
-        metadatas,
-        distances,
-    ):
-        formatted_results.append({
-            "chunk_id": chunk_id,
-            "text": text,
-            "document_id": metadata["document_id"],
-            "filename": metadata["filename"],
-            "page": metadata["page"],
-            "chunk_index": metadata["chunk_index"],
-            "distance": float(distance),
-        })
-
-    return formatted_results
-
-def list_documents() -> list[dict]:
-    """从向量数据库中汇总所有文档。"""
-
-    collection = _get_collection()
-    records = collection.get(
-        include=["metadatas"],
-    )
-
-    documents = {}
-
-    for metadata in records["metadatas"] or []:
-        if not metadata:
-            continue
-
-        document_id = metadata.get("document_id")
-
-        if not document_id:
-            continue
-
-        if document_id not in documents:
-            documents[document_id] = {
-                "document_id": document_id,
-                "filename": metadata.get(
-                    "filename",
-                    "未知文件",
-                ),
-                "chunk_count": 0,
-            }
-
-        documents[document_id]["chunk_count"] += 1
-
-    return sorted(
-        documents.values(),
-        key=lambda item: item["filename"].lower(),
-    )
-
-
-def delete_document(document_id: str) -> int:
-    """删除指定文档的全部文本块和向量。"""
-
-    collection = _get_collection()
-    records = collection.get(
-        where={"document_id": document_id},
-        include=["metadatas"],
-    )
-
-    chunk_ids = records["ids"]
-
-    if not chunk_ids:
-        return 0
-
-    collection.delete(ids=chunk_ids)
-
-    return len(chunk_ids)
+        return [
+            {"chunk_id": cid, "text": text, **meta, "distance": float(dist)}
+            for cid, text, meta, dist in zip(
+                found["ids"][0], found["documents"][0], found["metadatas"][0], found["distances"][0]
+            )
+        ]

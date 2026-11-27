@@ -1,5 +1,5 @@
-# Vue 3 + Vite
+# KnowledgeFlow 前端
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 工作台使用同源 `/api/`。Vite 开发代理连接本机 8000 端口，构建产物应由生产网关托管。试点令牌仅保存在页面内存中；SSO 模式使用网关的同源会话。启动、权限分组和部署示例见仓库根目录 `README.md`。
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+网站客服作为独立页面 `/support/` 构建，无需员工登录。坐席入口在专用客服库的工作台内；启用与发布流程见根目录 README 的「网站 AI 客服」。

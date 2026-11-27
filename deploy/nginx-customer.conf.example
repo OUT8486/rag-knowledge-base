@@ -1,0 +1,33 @@
+# Public customer site ONLY. Keep the staff workspace on the separate SSO host.
+# Include in http{}; set the file paths and an actual public hostname/certificate.
+limit_req_zone $binary_remote_addr zone=kf_customer:10m rate=2r/s;
+server {
+    listen 443 ssl;
+    server_name help.example.com;
+    ssl_certificate /etc/knowledgeflow/help.crt;
+    ssl_certificate_key /etc/knowledgeflow/help.key;
+    root /srv/knowledgeflow/frontend/dist;
+    client_max_body_size 24k;
+    add_header Referrer-Policy no-referrer always;
+    add_header X-Content-Type-Options nosniff always;
+    location = / { return 302 /support/; }
+    location = /support { return 301 /support/; }
+    location /support/ { index index.html; try_files $uri $uri/ =404; }
+    location /assets/ { try_files $uri =404; }
+    location ~ ^/api/customer/(info|ask|tickets|ticket)$ {
+        limit_req zone=kf_customer burst=12 nodelay;
+        limit_req_status 429;
+        proxy_read_timeout 95s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_set_header X-RAG-Gateway-Key "";
+        proxy_set_header X-RAG-User "";
+        proxy_set_header X-RAG-Groups "";
+        proxy_pass http://127.0.0.1:8000;
+    }
+    # No employee API, login, or docs endpoint on the public hostname.
+    location / { return 404; }
+}

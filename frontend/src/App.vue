@@ -1,187 +1,98 @@
-
 <script setup>
-import { onMounted, ref } from 'vue'
-import axios from 'axios'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-const api = axios.create({
-  baseURL: 'http://127.0.0.1:8000',
-  timeout: 120000,
-})
-
-const documents = ref([])
-const selectedDocumentId = ref('')
-const question = ref('')
-
-const loadingDocs = ref(false)
-const uploading = ref(false)
-const deletingId = ref('')
-const chatting = ref(false)
-
-const notice = ref('')
-const errorMessage = ref('')
-const fileInput = ref(null)
-
-const messages = ref([
-  {
-    role: 'assistant',
-    content:
-      '你好！我是 KnowledgeFlow。上传文档后，你可以询问文档中的内容，我会尽量给出答案和来源。',
-    sources: [],
-  },
-])
-
-function getErrorMessage(error) {
-  return (
-    error.response?.data?.detail ||
-    error.message ||
-    '请求失败，请检查后端服务。'
-  )
+import SupportDesk from './components/SupportDesk.vue'
+const showDesk = ref(false)
+const props = defineProps({ api: Function, kb: Object, session: Object })
+const emit = defineEmits(['switch', 'logout', 'expired'])
+const controller = new AbortController()
+onBeforeUnmount(() => controller.abort())
+const { signal } = controller
+const prefix = `kbs/${encodeURIComponent(props.kb.id)}/`
+async function call(method, path, options = {}) {
+  try {
+    return (await props.api({ method, url: prefix + path, signal, ...options })).data
+  } catch (err) {
+    if (!signal.aborted && err.response?.status === 401) emit('expired')
+    throw err
+  }
 }
+const documents = ref([]), total = ref(0), offset = ref(0), limit = 50
+const selectedDocumentId = ref(''), question = ref(''), fileInput = ref(null)
+const loadingDocs = ref(false), uploading = ref(false), deletingId = ref(''), chatting = ref(false)
+const notice = ref(''), errorMessage = ref(''), failedJob = ref(null)
+const messages = ref([{role: 'assistant', content: `你正在查询「${props.kb.name}」。回答中的引用仅来自这个知识库。`, sources: []}])
+const detail = e => e.response?.data?.detail || e.message || '请求失败'
 
-async function loadDocuments() {
+async function loadDocuments(next = offset.value) {
   loadingDocs.value = true
-  errorMessage.value = ''
-
   try {
-    const response = await api.get('/api/documents')
-    documents.value = response.data.documents || []
-  } catch (error) {
-    errorMessage.value = `加载文档失败：${getErrorMessage(error)}`
-  } finally {
-    loadingDocs.value = false
+    const data = await call('get', 'documents', {params: {limit, offset: next}})
+    offset.value = next; documents.value = data.documents; total.value = data.document_count
+  } catch (e) { errorMessage.value = `加载文档失败：${detail(e)}` }
+  finally { loadingDocs.value = false }
+}
+async function track(job) {
+  while (!signal.aborted && ['queued', 'running'].includes(job.status)) {
+    notice.value = `${job.filename}：${job.status === 'queued' ? '已保存，等待入库' : '正在解析并建立索引'}…`
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    if (signal.aborted) return
+    job = await call('get', `jobs/${job.job_id}`)
+  }
+  if (signal.aborted) return
+  if (job.status === 'failed') {
+    failedJob.value = job; notice.value = ''; errorMessage.value = `${job.filename}：${job.error}`
+  } else {
+    notice.value = job.is_active ? `${job.filename}：已发布版本 ${job.version}，${job.indexed_count} 个文本块。` : `${job.filename}：相同内容已在历史版本 ${job.version} 中，不会替换当前版本。`
+    await loadDocuments(0)
   }
 }
-
 async function uploadDocument(event) {
-  const file = event.target.files?.[0]
-
-  if (!file) return
-
-  if (!file.name.toLowerCase().endsWith('.pdf')) {
-    notice.value = '目前只支持 PDF 文件。'
-    event.target.value = ''
-    return
+  const file = event.target.files?.[0]; event.target.value = ''
+  if (!file || !props.kb.can_write) return
+  if (!file.name.toLowerCase().endsWith('.pdf') || file.size > 10 * 1024 * 1024) {
+    errorMessage.value = '请上传 10 MB 以内的 PDF 文件。'; return
   }
-
-  if (file.size > 10 * 1024 * 1024) {
-    notice.value = '文件不能超过 10 MB。'
-    event.target.value = ''
-    return
-  }
-
-  uploading.value = true
-  notice.value = ''
-  errorMessage.value = ''
-
-  const formData = new FormData()
-  formData.append('file', file)
-
-  try {
-    const response = await api.post(
-      '/api/documents/upload',
-      formData,
-    )
-
-    const data = response.data
-
-    notice.value =
-      `${data.filename}：已处理 ${data.indexed_count} 个文本块。`
-
-    await loadDocuments()
-  } catch (error) {
-    errorMessage.value = `上传失败：${getErrorMessage(error)}`
-  } finally {
-    uploading.value = false
-    event.target.value = ''
-  }
+  uploading.value = true; failedJob.value = null; errorMessage.value = ''; notice.value = '正在上传…'
+  const data = new FormData(); data.append('file', file)
+  try { await track(await call('post', 'documents/upload', {data})) }
+  catch (e) { errorMessage.value = `上传或查询进度失败：${detail(e)}。可重传同一文件恢复进度。`; notice.value = '' }
+  finally { uploading.value = false }
 }
-
-async function deleteDocument(document) {
-  const confirmed = window.confirm(
-    `确定删除「${document.filename}」及其向量数据吗？`,
-  )
-
-  if (!confirmed) return
-
-  deletingId.value = document.document_id
-  notice.value = ''
-  errorMessage.value = ''
-
-  try {
-    await api.delete(
-      `/api/documents/${document.document_id}`,
-    )
-
-    if (selectedDocumentId.value === document.document_id) {
-      selectedDocumentId.value = ''
-    }
-
-    notice.value = `已删除 ${document.filename} 的向量数据。`
-
-    await loadDocuments()
-  } catch (error) {
-    errorMessage.value = `删除失败：${getErrorMessage(error)}`
-  } finally {
-    deletingId.value = ''
-  }
+async function retryJob() {
+  const job = failedJob.value
+  if (!job || uploading.value) return
+  uploading.value = true; errorMessage.value = ''; failedJob.value = null
+  try { await track(await call('post', `jobs/${job.job_id}/retry`)) }
+  catch (e) { errorMessage.value = `重试失败：${detail(e)}`; failedJob.value = job }
+  finally { uploading.value = false }
 }
-
+async function deleteDocument(doc) {
+  if (!props.kb.can_write || !window.confirm(`确定删除「${doc.filename}」及其所有版本吗？`)) return
+  deletingId.value = doc.document_id; errorMessage.value = ''
+  try {
+    await call('delete', `documents/${doc.document_id}`)
+    if (selectedDocumentId.value === doc.document_id) selectedDocumentId.value = ''
+    notice.value = `已下线 ${doc.filename}。`; await loadDocuments(0)
+  } catch (e) { errorMessage.value = `删除失败：${detail(e)}` }
+  finally { deletingId.value = '' }
+}
 async function sendQuestion() {
   const text = question.value.trim()
-
   if (!text || chatting.value) return
-
-  messages.value.push({
-    role: 'user',
-    content: text,
-    sources: [],
-  })
-
-  question.value = ''
-  chatting.value = true
-  errorMessage.value = ''
-
+  messages.value.push({role: 'user', content: text, sources: []})
+  question.value = ''; chatting.value = true; errorMessage.value = ''
   try {
-    const payload = {
-      question: text,
-    }
-
-    // 选择了文档时只搜索该文档，否则搜索整个知识库
-    if (selectedDocumentId.value) {
-      payload.document_id = selectedDocumentId.value
-    }
-
-    const response = await api.post('/api/chat', payload)
-
-    messages.value.push({
-      role: 'assistant',
-      content: response.data.answer,
-      sources: response.data.sources || [],
-    })
-  } catch (error) {
-    messages.value.push({
-      role: 'assistant',
-      content: `请求失败：${getErrorMessage(error)}`,
-      sources: [],
-    })
-  } finally {
-    chatting.value = false
-  }
+    const data = {question: text, require_local: props.kb.policy === 'local_only'}
+    if (selectedDocumentId.value) data.document_id = selectedDocumentId.value
+    const result = await call('post', 'chat', {data})
+    messages.value.push({role: 'assistant', content: result.answer, sources: result.sources})
+  } catch (e) { messages.value.push({role: 'assistant', content: `请求失败：${detail(e)}`, sources: []}) }
+  finally { chatting.value = false }
 }
-
-function handleEnter(event) {
-  if (event.shiftKey) return
-
-  event.preventDefault()
-  sendQuestion()
-}
-
-function formatDistance(distance) {
-  if (typeof distance !== 'number') return '未知'
-  return distance.toFixed(3)
-}
-
-onMounted(loadDocuments)
+function handleEnter(e) { if (!e.shiftKey && !e.isComposing) { e.preventDefault(); sendQuestion() } }
+const formatDistance = distance => typeof distance === 'number' ? distance.toFixed(3) : '未知'
+onMounted(() => loadDocuments(0))
 </script>
 
 <template>
@@ -197,7 +108,7 @@ onMounted(loadDocuments)
 
       <div class="connection-status">
         <span class="status-dot"></span>
-        RAG 工作台
+        {{ session.subject }} · {{ kb.can_write ? '可管理' : '只读' }}
       </div>
     </header>
 
@@ -206,20 +117,26 @@ onMounted(loadDocuments)
         <div class="section-heading">
           <div>
             <p class="eyebrow">KNOWLEDGE BASE</p>
-            <h2>我的知识库</h2>
+            <h2>{{ kb.name }}</h2>
           </div>
 
           <span class="count-badge">
-            {{ documents.length }}
+            {{ total }}
           </span>
         </div>
 
         <p class="subtle-text">
-          上传 PDF，建立自己的文档知识库。
+          {{ kb.policy === 'local_only' ? '仅本地模型 · 问题与原文不送往云端' : '允许发送至管理员指定的云模型' }}
         </p>
+        <label class="field-label" for="kb-select">当前知识库</label>
+        <select id="kb-select" class="document-select" :value="kb.id" @change="emit('switch', $event.target.value)">
+          <option v-for="item in session.knowledge_bases" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select>
+        <p v-if="kb.customer_desk"><button class="text-button" @click="showDesk = !showDesk">{{ showDesk ? '返回知识库问答' : '进入客服坐席台' }}</button></p>
+        <p><button class="text-button" @click="emit('logout')">退出当前账号</button></p>
 
         <button
-          class="primary-button upload-button"
+          v-if="kb.can_write" class="primary-button upload-button"
           :disabled="uploading"
           @click="fileInput?.click()"
         >
@@ -256,7 +173,7 @@ onMounted(loadDocuments)
           <button
             class="text-button"
             :disabled="loadingDocs"
-            @click="loadDocuments"
+            @click="loadDocuments()"
           >
             {{ loadingDocs ? '刷新中…' : '刷新' }}
           </button>
@@ -265,7 +182,7 @@ onMounted(loadDocuments)
         <div v-if="documents.length === 0 && !loadingDocs" class="empty-state">
           <div class="empty-icon">▤</div>
           <p>知识库还是空的</p>
-          <span>上传一份 PDF 开始体验。</span>
+          <span>{{ kb.can_write ? '上传 PDF 后即可提问。' : '请联系知识库管理员上传文档。' }}</span>
         </div>
 
         <article
@@ -287,7 +204,7 @@ onMounted(loadDocuments)
           </div>
 
           <button
-            class="delete-button"
+            v-if="kb.can_write" class="delete-button"
             title="删除文档"
             :disabled="deletingId === doc.document_id"
             @click.stop="deleteDocument(doc)"
@@ -296,13 +213,19 @@ onMounted(loadDocuments)
           </button>
         </article>
 
+        <nav v-if="total > limit" class="pager" aria-label="文档分页">
+          <button class="text-button" :disabled="loadingDocs || offset === 0" @click="loadDocuments(offset-limit)">上一页</button>
+          <span>{{ offset + 1 }}–{{ offset + documents.length }} / {{ total }}</span>
+          <button class="text-button" :disabled="loadingDocs || offset + limit >= total" @click="loadDocuments(offset+limit)">下一页</button>
+        </nav>
         <div class="sidebar-footer">
           <span class="status-dot"></span>
-          <span>通过本地 API 连接后端</span>
+          <span>仅显示当前知识库的已发布版本</span>
         </div>
       </aside>
 
-      <section class="chat-panel">
+      <SupportDesk v-if="showDesk && kb.customer_desk" :call="call" />
+      <section v-else class="chat-panel">
         <div class="chat-header">
           <div>
             <p class="eyebrow">AI ASSISTANT</p>
@@ -317,7 +240,7 @@ onMounted(loadDocuments)
           </div>
         </div>
 
-        <div class="notice-area">
+        <div class="notice-area" aria-live="polite"><button v-if="failedJob && kb.can_write" class="text-button" @click="retryJob">重试入库任务</button>
           <div v-if="notice" class="notice success-notice">
             {{ notice }}
             <button @click="notice = ''">×</button>
@@ -432,6 +355,7 @@ onMounted(loadDocuments)
 </template>
 
 <style scoped>
+.pager { display:flex; justify-content:space-between; align-items:center; font-size:.8rem; margin:1em 0; }
 .app-shell {
   min-height: 100vh;
   background: #f4f6fa;

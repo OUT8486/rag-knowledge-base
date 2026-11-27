@@ -1,14 +1,14 @@
-from openai import APIConnectionError, APIStatusError
+import httpx2
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 
-def should_retry_model_error(exc: Exception) -> bool:
+def should_retry_model_error(exc: Exception, *, retry_read_timeout: bool = True) -> bool:
+    if isinstance(exc, APITimeoutError) and isinstance(exc.__cause__, httpx2.ReadTimeout):
+        return retry_read_timeout
     if isinstance(exc, APIConnectionError):
         return True
     if isinstance(exc, APIStatusError):
         if exc.code == "insufficient_quota":
             return False
-        elif exc.status_code == 408 or exc.status_code == 409 or exc.status_code == 429:
-            return True
-        elif exc.status_code >= 500 and exc.status_code <= 599:
-            return True
+        return exc.status_code in (408, 409, 429) or 500 <= exc.status_code <= 599
     return False

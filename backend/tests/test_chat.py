@@ -1,218 +1,143 @@
+"""Scoped chat contract: validate first; rewrite cannot change retrieval scope or destination."""
 
-
-from unittest.mock import patch
+from unittest.mock import Mock
 
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
-from app.services.errors import ExtractionError
+from app.api import chat
 from app.services.extract import SearchIntent
-from app.services.llm import LLMConfigurationError
+from app.services.llm import NO_EVIDENCE
 
-def test_chat1():
-    with TestClient(app) as client:
-        response = client.post("/api/chat", json={})
-    assert response.status_code == 422
-    error = response.json()["detail"][0]
-    assert error["type"] == "missing"
-    assert error["loc"] == ["body", "question"]
+URL = "/api/kbs/finance/chat"
 
-def test_chat2():
-    with TestClient(app) as client:
-        response = client.post("/api/chat", json={"question":""})
-    assert response.status_code == 422
-    error = response.json()["detail"][0]
-    assert error["type"] == "string_too_short"
-    assert error["loc"] == ["body", "question"]
 
-def test_chat3():
-    with TestClient(app) as client:
-        response = client.post("/api/chat", json={"question":" "})
-    assert response.status_code == 400
-    assert response.json() == {"detail": "问题不能为空。"}
-
-def test_chat_no_results():
-    question = "什么是 RAG？"
-    intent = SearchIntent(query="RAG 定义")
-    with (
-        patch("app.api.chat.generate_search_intent", return_value=intent) as mock_intent,
-        patch("app.api.chat.search_chunks", return_value=[]) as mock_search,
-        patch("app.api.chat.generate_answer", return_value="mock answer") as mock_model,
-        TestClient(app) as client,
-    ):
-        response = client.post(
-            "/api/chat",
-            json={"question": question},
-        )
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "answer": "知识库中没有找到相关资料，暂时无法回答。",
-            "sources": [],
+@pytest.fixture
+def indexed(pilot, monkeypatch):
+    cat = pilot.rt.catalog
+    job = cat.enqueue("finance", "finance", "手册.pdf", b"synthetic")
+    cat.claim()
+    cat.finish(job["job_id"], 2, 2)
+    chunks = [
+        {
+            "chunk_id": f"chunk-{i}",
+            "document_id": job["document_id"],
+            "version_id": job["job_id"],
+            "filename": "手册.pdf",
+            "page": i,
+            "chunk_index": i,
+            "distance": 0.1,
+            "text": f"第{i}条制度",
         }
-        mock_intent.assert_called_once_with(question)
-        mock_search.assert_called_once_with(intent.query, 5, None)
-        mock_model.assert_not_called()
-        
-def test_chat_retrieval_failure():
-    question = "什么是 RAG？"
-    intent = SearchIntent(query="RAG 定义")
-    with (
-        patch("app.api.chat.generate_search_intent", return_value=intent) as mock_intent,
-        patch(
-            "app.api.chat.search_chunks", side_effect=RuntimeError("mock retrieval failed")
-        ) as mock_search,
-        patch("app.api.chat.generate_answer", return_value="mock answer") as mock_model,
-        TestClient(app) as client,
-    ):
-        response = client.post(
-            "/api/chat",
-            json={"question": question},
-        )
-        assert response.status_code == 500
-        assert response.json() == {"detail": "知识库检索失败，请稍后重试。"}
-        mock_intent.assert_called_once_with(question)
-        mock_search.assert_called_once_with(intent.query, 5, None)
-        mock_model.assert_not_called()
+        for i in (1, 2)
+    ]
+    search = Mock(return_value=chunks)
+    intent = Mock(
+        return_value=SearchIntent(query="改写词", document_id="ignored-model-scope", top_k=9)
+    )
+    answer = Mock(return_value="结论一 [S1]，结论二 [S2]。")
+    monkeypatch.setattr(pilot.rt, "search", search)
+    monkeypatch.setattr(chat, "generate_search_intent", intent)
+    monkeypatch.setattr(chat, "generate_answer", answer)
+    return job, chunks, intent, search, answer
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_detail"),
+    "body,status",
     [
-        pytest.param(
-            ExtractionError("模型输出不是合法 JSON"),
-            502,
-            "模型调用失败，请稍后重试。",
-            id="extraction-error",
-        ),
-        pytest.param(
-            LLMConfigurationError("缺少模型配置"),
-            503,
-            "服务配置不完整，请联系管理员。",
-            id="configuration-error",
-        ),
-        pytest.param(
-            RuntimeError("意图模型调用失败"),
-            502,
-            "模型调用失败，请稍后重试。",
-            id="model-call-error",
-        ),
+        ({}, 422),
+        ({"question": ""}, 422),
+        ({"question": " "}, 400),
+        ({"question": "x", "policy": "approved_cloud"}, 422),
     ],
 )
-def test_chat_intent_generation_failure(error, expected_status, expected_detail):
-    question = "申请年假需要哪些材料？"
-    with (
-        patch("app.api.chat.generate_search_intent", side_effect=error) as mock_intent,
-        patch("app.api.chat.search_chunks") as mock_search,
-        patch("app.api.chat.generate_answer") as mock_answer,
-        TestClient(app) as client,
-    ):
-        response = client.post("/api/chat", json={"question": question})
-
-        assert response.status_code == expected_status
-        assert response.json() == {"detail": expected_detail}
-        mock_intent.assert_called_once_with(question)
-        mock_search.assert_not_called()
-        mock_answer.assert_not_called()
+def test_validation(pilot, indexed, body, status):
+    assert pilot.client.post(URL, json=body, headers=pilot.auth("finance")).status_code == status
+    indexed[2].assert_not_called()
 
 
-def test_chat_uses_rewritten_query_and_user_search_scope():
-    question = "请问我刚入职三个月，申请年假要准备哪些材料？"
-    rewritten_query = "入职三个月员工 年假申请所需材料"
-    intent = SearchIntent(query=rewritten_query)
-    assert intent.top_k == 5
-    assert intent.document_id is None
-
-    chunks = [
-        {
-            "chunk_id": "chunk-1",
-            "document_id": "doc-abc",
-            "filename": "handbook.pdf",
-            "page": 2,
-            "chunk_index": 0,
-            "text": "申请年假需要填写申请表。",
-            "distance": 0.1,
-        },
-        {
-            "chunk_id": "chunk-2",
-            "document_id": "doc-abc",
-            "filename": "handbook.pdf",
-            "page": 3,
-            "chunk_index": 1,
-            "text": "申请表由直属主管审批。",
-            "distance": 0.2,
-        },
-    ]
-    expected_sources = [
-        {"source_id": "S1", **chunks[0]},
-        {"source_id": "S2", **chunks[1]},
-    ]
-    answer = "需要填写年假申请表 [S1]，交由直属主管审批 [S2]。"
-
-    with (
-        patch("app.api.chat.generate_search_intent", return_value=intent) as mock_intent,
-        patch("app.api.chat.search_chunks", return_value=chunks) as mock_search,
-        patch("app.api.chat.generate_answer", return_value=answer) as mock_answer,
-        TestClient(app) as client,
-    ):
-        response = client.post(
-            "/api/chat",
-            json={"question": question, "top_k": 2, "document_id": "doc-abc"},
+def test_no_results_and_missing_document_do_not_answer(pilot, indexed):
+    _, _, intent, search, answer = indexed
+    for doc in ("not-visible", None):
+        search.return_value = []
+        res = pilot.client.post(
+            URL, json={"question": "假期？", "document_id": doc}, headers=pilot.auth("finance")
         )
+        assert res.json() == {"answer": NO_EVIDENCE, "sources": []}
+    assert (
+        intent.call_count == 1
+    )  # Missing/foreign document short-circuits before any model invocation.
+    answer.assert_not_called()
 
-        assert response.status_code == 200
-        assert response.json() == {"answer": answer, "sources": expected_sources}
-        mock_intent.assert_called_once_with(question)
-        mock_search.assert_called_once_with(rewritten_query, 2, "doc-abc")
-        mock_answer.assert_called_once_with(question, expected_sources)
+
+def test_retrieval_failure(pilot, indexed):
+    *_, search, answer = indexed
+    search.side_effect = RuntimeError("private diagnostic")
+    res = pilot.client.post(URL, json={"question": "制度？"}, headers=pilot.auth("finance"))
+    assert res.status_code == 500 and "private" not in res.text
+    answer.assert_not_called()
+
+
+def test_rewrite_fallback_uses_original_and_never_changes_route(pilot, indexed):
+    job, _, intent, search, answer = indexed
+    intent.side_effect = ValueError("invalid model JSON")
+    res = pilot.client.post(URL, json={"question": " 原问题 "}, headers=pilot.auth("finance"))
+    assert res.status_code == 200
+    search.assert_called_once_with("finance", [job["job_id"]], "原问题", 5)
+    assert intent.call_args.args[1] == answer.call_args.args[2] == chat.model_route("local_only")
+
+
+def test_rewrite_uses_user_scope_not_model_fields(pilot, indexed):
+    job, chunks, intent, search, answer = indexed
+    res = pilot.client.post(
+        URL,
+        json={"question": "制度？", "top_k": 2, "document_id": job["document_id"]},
+        headers=pilot.auth("finance"),
+    )
+    assert res.status_code == 200
+    assert res.json()["sources"] == [dict(c, source_id=f"S{i}") for i, c in enumerate(chunks, 1)]
+    intent.assert_called_once_with("制度？", chat.model_route("local_only"))
+    search.assert_called_once_with("finance", [job["job_id"]], "改写词", 2)
+    assert answer.call_args.args == (
+        "制度？",
+        res.json()["sources"],
+        chat.model_route("local_only"),
+    )
+
+
+@pytest.mark.parametrize("length", [2999, 3000, 3001, 5000])
+def test_text_budget_keeps_only_excerpts_sent(pilot, indexed, length):
+    _, chunks, _, _, answer = indexed
+    chunks[0]["text"] = "甲" * 1000
+    chunks[1]["text"] = "乙" * (length - 1000)
+    res = pilot.client.post(URL, json={"question": "制度？"}, headers=pilot.auth("finance"))
+    assert res.status_code == 200
+    assert sum(len(s["text"]) for s in res.json()["sources"]) == min(length, 3000)
+    assert answer.call_args.args[1] == res.json()["sources"]
 
 
 @pytest.mark.parametrize(
-    "text_chars, expected_status, expected_model_calls",
-    [
-        (2999, 200, 1),
-        (3000, 200, 1),
-        (3001, 413, 0),
-    ],
+    "model_answer", ["没有引用", "不存在的来源 [S99]", "混合引用 [S1][S0]", NO_EVIDENCE]
 )
-def test_chat_text_budget(
-    text_chars, expected_status, expected_model_calls
-):
-    question = "什么是 RAG？"
-    intent = SearchIntent(query="RAG 定义")
-    chunks = [
-        {
-            "chunk_id": f"mock-chunk-{index}",
-            "document_id": "mock-document",
-            "filename": "mock.pdf",
-            "page": 1,
-            "chunk_index": index,
-            "text": "x" * length,
-            "distance": 0.1,
-        }
-        for index, length in enumerate(
-            [1000, text_chars - 1000]
-        )
-    ]
+def test_missing_invalid_or_refused_citations(pilot, indexed, model_answer):
+    indexed[-1].return_value = model_answer
+    assert pilot.client.post(
+        URL, json={"question": "问题"}, headers=pilot.auth("finance")
+    ).json() == {"answer": NO_EVIDENCE, "sources": []}
 
-    with (
-        patch("app.api.chat.generate_search_intent", return_value=intent) as mock_intent,
-        patch("app.api.chat.search_chunks", return_value=chunks) as mock_search,
-        patch("app.api.chat.generate_answer", return_value="mock answer") as mock_model,
-        TestClient(app) as client,
-    ):
-        response = client.post(
-            "/api/chat",
-            json={"question": question},
-        )
-        assert response.status_code == expected_status
-        mock_intent.assert_called_once_with(question)
-        mock_search.assert_called_once_with(intent.query, 5, None)
-        assert mock_model.call_count == expected_model_calls
-        body = response.json()
-        if response.status_code == 200:
-            assert body["answer"] == "mock answer"
-            assert len(body["sources"]) == 2
-        elif response.status_code == 413:
-            assert body == {"detail": "检索资料超过本次请求的字符预算，请缩小问题范围。"}
+
+def test_answer_failure_not_rerouted(pilot, indexed):
+    indexed[-1].side_effect = RuntimeError("failure")
+    res = pilot.client.post(URL, json={"question": "问题"}, headers=pilot.auth("finance"))
+    assert res.status_code == 502 and indexed[-1].call_count == 1
+
+
+def test_local_consent_survives_kb_reclassification(pilot, indexed):
+    import json
+
+    pilot.config["knowledge_bases"]["finance"]["policy"] = "approved_cloud"
+    pilot.path.write_text(json.dumps(pilot.config), encoding="utf-8")
+    response = pilot.client.post(
+        URL, headers=pilot.auth("finance"), json={"question": "旧页面的问题", "require_local": True}
+    )
+    assert response.status_code == 409
+    for stage in indexed[2:]:
+        stage.assert_not_called()
