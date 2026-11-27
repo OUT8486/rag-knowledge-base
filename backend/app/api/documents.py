@@ -103,11 +103,11 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     document_id = uuid4().hex
 
-    chunks = chunk_pages(
+    # 按 token 切分会加载本地模型并运行 tokenizer，和向量编码一样交给线程池。
+    chunks = await run_in_threadpool(
+        chunk_pages,
         pages=pages,
         document_id=document_id,
-        chunk_size=600,
-        overlap=100,
     )
 
     # 将向量编码与数据库写入放在线程池中运行

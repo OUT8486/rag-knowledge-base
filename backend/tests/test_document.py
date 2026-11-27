@@ -3,6 +3,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.embedding import EmbeddingTokenBudget
 
 
 def test_upload_empty_pdf():
@@ -104,12 +105,17 @@ def test_upload_no_text():
         mock_chunk.assert_not_called()
         mock_index.assert_not_called()
         
-def test_upload_single_long_page():
+def test_upload_single_long_page(test_tokenizer):
+    first, second = "甲" * 299 + "。", "乙" * 299 + "。"
     pages = [
-        {"page": 1, "text": "RAG"*300},
+        {"page": 1, "text": first + second},
     ]
     with (
         patch("app.api.documents.extract_pdf_pages", return_value = pages) as mock_parse,
+        patch(
+            "app.services.chunker.get_embedding_token_budget",
+            return_value=EmbeddingTokenBudget(test_tokenizer, 510),
+        ),
         patch("app.api.documents.add_chunks", return_value = 2) as mock_index,
         TestClient(app) as client,
     ):
@@ -126,19 +132,24 @@ def test_upload_single_long_page():
         assert body["blank_page_count"] == 0
         assert body["chunk_count"] == 2
         assert body["indexed_count"] == 2
-        assert body["total_characters"] == 900
+        assert body["total_characters"] == 600
         assert body["chunks_preview"][0]["page"] == 1
         assert body["chunks_preview"][1]["page"] == 1
+        assert [chunk["text"] for chunk in body["chunks_preview"]] == [first, second]
         mock_parse.assert_called_once_with(content)
         mock_index.assert_called_once_with(body["chunks_preview"], pdf_name)
 
-def test_upload_with_blank_page():
+def test_upload_with_blank_page(test_tokenizer):
     pages = [
         {"page": 1, "text": "   \n"},
         {"page": 2, "text": "RAG"}
     ]
     with (
         patch("app.api.documents.extract_pdf_pages", return_value = pages) as mock_parse,
+        patch(
+            "app.services.chunker.get_embedding_token_budget",
+            return_value=EmbeddingTokenBudget(test_tokenizer, 510),
+        ),
         patch("app.api.documents.add_chunks", return_value = 1) as mock_index,
         TestClient(app) as client,
     ):
