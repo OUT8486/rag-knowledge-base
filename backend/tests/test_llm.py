@@ -4,8 +4,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx2
 import pytest
-from openai import OpenAIError
+from openai import APIConnectionError, OpenAIError
 from pydantic import ValidationError
 
 from app.services.errors import ExtractionError
@@ -62,6 +63,25 @@ def test_generate_search_intent_returns_valid_intent(mock_openai, content, expec
     ]
     assert len(user_messages) == 1
     assert question in user_messages[0]["content"]
+
+
+def test_generate_search_intent_retries_after_connection_error(mock_openai):
+    mock_create = mock_openai.return_value.chat.completions.create
+    response = mock_create.return_value
+    response.choices[0].message.content = (
+        '{"query": "退货运费谁承担", "top_k": 3, "document_id": "doc-1"}'
+    )
+    request = httpx2.Request("POST", "https://llm.example.test/v1/chat/completions")
+    mock_create.side_effect = [APIConnectionError(request=request), response]
+
+    with patch("app.services.retry_executor.time.sleep"):
+        intent = generate_search_intent("请问退货运费由谁承担？")
+
+    assert mock_create.call_count == 2
+    assert isinstance(intent, SearchIntent)
+    assert intent.query == "退货运费谁承担"
+    assert intent.top_k == 3
+    assert intent.document_id == "doc-1"
 
 
 def test_question_is_trimmed_before_model_call(mock_openai):

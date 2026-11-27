@@ -187,7 +187,8 @@ def generate_search_intent(
     {question}
     """.strip()
     
-    response = client.chat.completions.create(
+    def operation():
+        return client.chat.completions.create(
         model=model_name,
         messages=[
             {
@@ -203,6 +204,8 @@ def generate_search_intent(
         max_tokens=800,
         )
     
+    response = call_with_retry(operation)
+        
     answer = response.choices[0].message.content
     
     if answer == None or answer == "":
